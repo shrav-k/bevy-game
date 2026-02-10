@@ -1,0 +1,15 @@
+[package]
+name = "bevy-game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.18"
+
+# Optimize debug builds for better performance
+# Bevy projects are notoriously slow in debug mode without these settings
+[profile.dev]
+opt-level = 1  # Basic optimization for dev builds
+
+[profile.dev.package."*"]
+opt-level = 3  # Full optimization for dependencies
