@@ -114,3 +114,22 @@ impl SelectionState {
         self.selected_unit = Some(entity);
     }
 }
+
+// ===== TURN TIMER RESOURCE (for Phase 4) =====
+
+use bevy::time::Timer;
+use bevy::time::TimerMode;
+
+/// Timer for enemy turn delay
+#[derive(Resource)]
+pub struct EnemyTurnTimer {
+    pub timer: Timer,
+}
+
+impl Default for EnemyTurnTimer {
+    fn default() -> Self {
+        Self {
+            timer: Timer::from_seconds(1.5, TimerMode::Once),
+        }
+    }
+}

@@ -3,10 +3,10 @@
 
 use bevy::prelude::*;
 
-use crate::components::{Faction, GridPosition, Hoverable, Selected, Tile, Unit};
+use crate::components::{Faction, GridPosition, Hoverable, Selected, Tile, TurnStatus, Unit};
 use crate::constants::*;
-use crate::resources::{GridMap, SelectionState};
-use crate::AppState;
+use crate::resources::{EnemyTurnTimer, GridMap, SelectionState, TurnManager};
+use crate::{AppState, TurnState};
 
 // ===== SETUP SYSTEMS =====
 
@@ -218,7 +218,7 @@ pub fn setup_main_menu(mut commands: Commands) {
 
             // Phase info text
             parent.spawn((
-                Text::new("Phase 2: State Management"),
+                Text::new("Phase 4: Turn-Based Movement"),
                 TextFont {
                     font_size: 20.0,
                     ..default()
@@ -273,6 +273,7 @@ pub fn spawn_units(mut commands: Commands, grid_map: Res<GridMap>) {
                 faction: Faction::Player,
             },
             grid_pos,
+            TurnStatus::default(), // Track if unit has acted this turn
             Sprite {
                 color: PLAYER_COLOR,
                 custom_size: Some(Vec2::new(UNIT_RADIUS * 2.0, UNIT_RADIUS * 2.0)),
@@ -294,6 +295,7 @@ pub fn spawn_units(mut commands: Commands, grid_map: Res<GridMap>) {
                 faction: Faction::Enemy,
             },
             grid_pos,
+            TurnStatus::default(), // Track if unit has acted this turn
             Sprite {
                 color: ENEMY_COLOR,
                 custom_size: Some(Vec2::new(UNIT_RADIUS * 2.0, UNIT_RADIUS * 2.0)),
@@ -427,6 +429,265 @@ pub fn highlight_selected_system(
                     SelectionRing,
                 ));
             });
+        }
+    }
+}
+
+// ===== TURN-BASED MOVEMENT SYSTEMS (Phase 4) =====
+
+/// Marker component for movement highlight overlays
+#[derive(Component)]
+pub struct MovementHighlight;
+
+/// Highlights valid movement tiles for the selected unit
+/// Shows green overlay on adjacent tiles
+pub fn highlight_movement_system(
+    mut commands: Commands,
+    selected_query: Query<(&GridPosition, &Unit), With<Selected>>,
+    highlight_query: Query<Entity, With<MovementHighlight>>,
+    selection_state: Res<SelectionState>,
+    grid_map: Res<GridMap>,
+    turn_state: Res<State<TurnState>>,
+) {
+    // Only update if selection changed
+    if !selection_state.is_changed() {
+        return;
+    }
+
+    // Remove old highlights
+    for highlight_entity in &highlight_query {
+        commands.entity(highlight_entity).despawn();
+    }
+
+    // Only show movement during player turn
+    if *turn_state.get() != TurnState::PlayerTurn {
+        return;
+    }
+
+    // Highlight valid moves for selected unit
+    if let Some(selected_entity) = selection_state.selected_unit {
+        if let Ok((grid_pos, _)) = selected_query.get(selected_entity) {
+            // Get adjacent tiles (4-directional movement)
+            let adjacent_positions = grid_pos.adjacent();
+
+            for adj_pos in adjacent_positions {
+                // Check if position is in bounds
+                if grid_map.is_in_bounds(&adj_pos) {
+                    let world_pos = grid_map.grid_to_world(&adj_pos);
+
+                    // Spawn highlight overlay
+                    commands.spawn((
+                        Sprite {
+                            color: MOVEMENT_HIGHLIGHT,
+                            custom_size: Some(Vec2::new(TILE_SIZE, TILE_SIZE)),
+                            ..default()
+                        },
+                        Transform::from_xyz(world_pos.x, world_pos.y, Z_OVERLAY),
+                        MovementHighlight,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Handles unit movement on click
+/// Moves selected unit to adjacent tile if valid
+pub fn movement_system(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    grid_map: Res<GridMap>,
+    mut unit_query: Query<(&mut GridPosition, &mut Transform, &mut TurnStatus, &Unit), With<Selected>>,
+    selection_state: Res<SelectionState>,
+    turn_state: Res<State<TurnState>>,
+) {
+    // Only allow movement during player turn
+    if *turn_state.get() != TurnState::PlayerTurn {
+        return;
+    }
+
+    // Only process if left mouse button was just pressed
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+
+    if let Some(cursor_pos) = window.cursor_position() {
+        if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) {
+            let clicked_grid_pos = grid_map.world_to_grid(world_pos);
+
+            // Get the selected unit
+            if let Some(selected_entity) = selection_state.selected_unit {
+                if let Ok((mut unit_grid_pos, mut unit_transform, mut turn_status, _)) =
+                    unit_query.get_mut(selected_entity)
+                {
+                    // Check if clicked position is adjacent
+                    let adjacent_positions = unit_grid_pos.adjacent();
+                    let is_adjacent = adjacent_positions
+                        .iter()
+                        .any(|pos| pos.x == clicked_grid_pos.x && pos.y == clicked_grid_pos.y);
+
+                    if is_adjacent && grid_map.is_in_bounds(&clicked_grid_pos) {
+                        // Move the unit
+                        let new_world_pos = grid_map.grid_to_world(&clicked_grid_pos);
+
+                        // Update grid position
+                        *unit_grid_pos = clicked_grid_pos;
+
+                        // Update world position
+                        unit_transform.translation.x = new_world_pos.x;
+                        unit_transform.translation.y = new_world_pos.y;
+
+                        // Mark as acted
+                        turn_status.has_acted = true;
+
+                        info!(
+                            "Unit moved to ({}, {})",
+                            clicked_grid_pos.x, clicked_grid_pos.y
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Checks if all units have acted and transitions turn
+pub fn check_turn_end_system(
+    unit_query: Query<(&Unit, &TurnStatus)>,
+    turn_state: Res<State<TurnState>>,
+    mut next_turn_state: ResMut<NextState<TurnState>>,
+    time: Res<Time>,
+    mut enemy_timer: ResMut<EnemyTurnTimer>,
+) {
+    match turn_state.get() {
+        TurnState::PlayerTurn => {
+            // Check if all player units have acted
+            let all_player_acted = unit_query
+                .iter()
+                .filter(|(unit, _)| unit.faction == Faction::Player)
+                .all(|(_, status)| status.has_acted);
+
+            if all_player_acted {
+                info!("All player units have acted - switching to enemy turn");
+                next_turn_state.set(TurnState::EnemyTurn);
+            }
+        }
+        TurnState::EnemyTurn => {
+            // Tick the timer
+            enemy_timer.timer.tick(time.delta());
+
+            // Only check for turn end after timer finishes
+            if enemy_timer.timer.just_finished() {
+                // Check if all enemy units have acted
+                let all_enemy_acted = unit_query
+                    .iter()
+                    .filter(|(unit, _)| unit.faction == Faction::Enemy)
+                    .all(|(_, status)| status.has_acted);
+
+                if all_enemy_acted {
+                    info!("All enemy units have acted - switching to player turn");
+                    next_turn_state.set(TurnState::PlayerTurn);
+                }
+            }
+        }
+    }
+}
+
+/// Resets turn status for player units at start of player turn
+pub fn start_player_turn(mut unit_query: Query<(&Unit, &mut TurnStatus)>) {
+    info!("Starting player turn");
+
+    for (unit, mut status) in &mut unit_query {
+        if unit.faction == Faction::Player {
+            status.has_acted = false;
+        }
+    }
+}
+
+/// Resets turn status for enemy units at start of enemy turn
+/// Also triggers AI to act
+pub fn start_enemy_turn(
+    mut unit_query: Query<(&Unit, &mut TurnStatus)>,
+    mut enemy_timer: ResMut<EnemyTurnTimer>,
+) {
+    info!("Starting enemy turn");
+
+    // Reset the timer
+    enemy_timer.timer.reset();
+
+    for (unit, mut status) in &mut unit_query {
+        if unit.faction == Faction::Enemy {
+            status.has_acted = false;
+        }
+    }
+
+    // For Phase 4, enemy units just pass their turn after a delay
+    // Phase 5 will add actual AI movement
+    for (unit, mut status) in &mut unit_query {
+        if unit.faction == Faction::Enemy {
+            status.has_acted = true;
+        }
+    }
+
+    info!("Enemy units will pass after delay (AI not implemented yet)");
+}
+
+// ===== TURN UI SYSTEMS (Phase 4) =====
+
+/// Marker component for turn indicator UI
+#[derive(Component)]
+pub struct TurnIndicatorUI;
+
+/// Sets up the turn indicator UI
+pub fn setup_turn_ui(mut commands: Commands) {
+    info!("Setting up turn UI");
+
+    // Spawn turn indicator in top-left corner
+    commands.spawn((
+        Text::new("Player Turn"),
+        TextFont {
+            font_size: 30.0,
+            ..default()
+        },
+        TextColor(PLAYER_COLOR),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(20.0),
+            top: Val::Px(20.0),
+            ..default()
+        },
+        TurnIndicatorUI,
+    ));
+}
+
+/// Updates turn indicator text based on current turn
+pub fn update_turn_ui_system(
+    mut query: Query<(&mut Text, &mut TextColor), With<TurnIndicatorUI>>,
+    turn_state: Res<State<TurnState>>,
+) {
+    if !turn_state.is_changed() {
+        return;
+    }
+
+    for (mut text, mut color) in &mut query {
+        match turn_state.get() {
+            TurnState::PlayerTurn => {
+                **text = "Player Turn".to_string();
+                *color = TextColor(PLAYER_COLOR);
+            }
+            TurnState::EnemyTurn => {
+                **text = "Enemy Turn".to_string();
+                *color = TextColor(ENEMY_COLOR);
+            }
         }
     }
 }
