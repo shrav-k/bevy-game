@@ -3,9 +3,9 @@
 
 use bevy::prelude::*;
 
-use crate::components::{GridPosition, Tile};
+use crate::components::{Faction, GridPosition, Hoverable, Selected, Tile, Unit};
 use crate::constants::*;
-use crate::resources::GridMap;
+use crate::resources::{GridMap, SelectionState};
 use crate::AppState;
 
 // ===== SETUP SYSTEMS =====
@@ -252,5 +252,181 @@ pub fn menu_input_system(
     if keyboard.just_pressed(KeyCode::Enter) {
         info!("Starting game...");
         next_state.set(AppState::GamePlay);
+    }
+}
+
+// ===== UNIT SYSTEMS (Phase 3) =====
+
+/// Spawns initial units on the grid
+/// Runs when entering GamePlay state
+pub fn spawn_units(mut commands: Commands, grid_map: Res<GridMap>) {
+    info!("Spawning units");
+
+    // Spawn 2 player units (blue circles)
+    let player_positions = vec![GridPosition::new(2, 2), GridPosition::new(3, 2)];
+
+    for grid_pos in player_positions {
+        let world_pos = grid_map.grid_to_world(&grid_pos);
+
+        commands.spawn((
+            Unit {
+                faction: Faction::Player,
+            },
+            grid_pos,
+            Sprite {
+                color: PLAYER_COLOR,
+                custom_size: Some(Vec2::new(UNIT_RADIUS * 2.0, UNIT_RADIUS * 2.0)),
+                ..default()
+            },
+            Transform::from_xyz(world_pos.x, world_pos.y, Z_UNIT),
+            Hoverable, // Can be hovered over with mouse
+        ));
+    }
+
+    // Spawn 2 enemy units (red circles)
+    let enemy_positions = vec![GridPosition::new(6, 7), GridPosition::new(7, 7)];
+
+    for grid_pos in enemy_positions {
+        let world_pos = grid_map.grid_to_world(&grid_pos);
+
+        commands.spawn((
+            Unit {
+                faction: Faction::Enemy,
+            },
+            grid_pos,
+            Sprite {
+                color: ENEMY_COLOR,
+                custom_size: Some(Vec2::new(UNIT_RADIUS * 2.0, UNIT_RADIUS * 2.0)),
+                ..default()
+            },
+            Transform::from_xyz(world_pos.x, world_pos.y, Z_UNIT),
+            Hoverable,
+        ));
+    }
+
+    info!("Spawned 4 units (2 player, 2 enemy)");
+}
+
+/// Handles unit selection with mouse clicks
+/// Only player units can be selected
+pub fn unit_selection_system(
+    buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    grid_map: Res<GridMap>,
+    unit_query: Query<(Entity, &GridPosition, &Unit), With<Hoverable>>,
+    selected_query: Query<Entity, With<Selected>>,
+    mut commands: Commands,
+    mut selection_state: ResMut<SelectionState>,
+) {
+    // Only process if left mouse button was just pressed
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+
+    let Ok((camera, camera_transform)) = camera_query.single() else {
+        return;
+    };
+
+    if let Some(cursor_pos) = window.cursor_position() {
+        if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) {
+            let clicked_grid_pos = grid_map.world_to_grid(world_pos);
+
+            // Find if there's a unit at the clicked position
+            let mut clicked_unit: Option<(Entity, &Unit)> = None;
+            for (entity, unit_grid_pos, unit) in &unit_query {
+                if unit_grid_pos.x == clicked_grid_pos.x && unit_grid_pos.y == clicked_grid_pos.y
+                {
+                    clicked_unit = Some((entity, unit));
+                    break;
+                }
+            }
+
+            // If we clicked on a unit
+            if let Some((entity, unit)) = clicked_unit {
+                // Only allow selecting player units
+                if unit.faction == Faction::Player {
+                    // Deselect previously selected unit
+                    for selected_entity in &selected_query {
+                        commands.entity(selected_entity).remove::<Selected>();
+                    }
+
+                    // Select the new unit
+                    commands.entity(entity).insert(Selected);
+                    selection_state.select_unit(entity);
+
+                    info!(
+                        "Selected player unit at ({}, {})",
+                        clicked_grid_pos.x, clicked_grid_pos.y
+                    );
+                } else {
+                    info!(
+                        "Clicked enemy unit at ({}, {}) - cannot select",
+                        clicked_grid_pos.x, clicked_grid_pos.y
+                    );
+                }
+            } else {
+                // Clicked empty tile - deselect all
+                for selected_entity in &selected_query {
+                    commands.entity(selected_entity).remove::<Selected>();
+                }
+                selection_state.clear_selection();
+
+                info!(
+                    "Clicked empty tile at ({}, {}) - deselected all",
+                    clicked_grid_pos.x, clicked_grid_pos.y
+                );
+            }
+        }
+    }
+}
+
+/// Marker component for selection visual indicators
+#[derive(Component)]
+pub struct SelectionRing;
+
+/// Adds visual feedback for selected units
+/// Spawns a yellow ring around selected units
+/// Only updates when selection changes
+pub fn highlight_selected_system(
+    mut commands: Commands,
+    selected_query: Query<Entity, (With<Unit>, With<Selected>)>,
+    ring_query: Query<Entity, With<SelectionRing>>,
+    selection_state: Res<SelectionState>,
+) {
+    // Only update if selection state changed
+    if !selection_state.is_changed() {
+        return;
+    }
+
+    // Remove old selection rings
+    for ring_entity in &ring_query {
+        commands.entity(ring_entity).despawn();
+    }
+
+    // Add selection ring to currently selected unit
+    if let Some(selected_entity) = selection_state.selected_unit {
+        // Check if unit still has Selected component
+        if selected_query.get(selected_entity).is_ok() {
+            // Spawn a selection ring as a child of the unit
+            commands.entity(selected_entity).with_children(|parent| {
+                parent.spawn((
+                    Sprite {
+                        color: SELECTED_COLOR,
+                        custom_size: Some(Vec2::new(
+                            SELECTION_RING_RADIUS * 2.0,
+                            SELECTION_RING_RADIUS * 2.0,
+                        )),
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, 0.0, Z_SELECTION - Z_UNIT), // Relative to parent
+                    SelectionRing,
+                ));
+            });
+        }
     }
 }

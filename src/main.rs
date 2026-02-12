@@ -3,7 +3,7 @@
 //! This is a simple turn-based tactical game built to learn Bevy's
 //! Entity Component System (ECS) architecture.
 //!
-//! Phase 2: State management and input
+//! Phase 3: Units and selection
 
 use bevy::prelude::*;
 
@@ -32,7 +32,7 @@ fn main() {
         // Add default Bevy plugins (rendering, input, windowing, etc.)
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Turn-Based Tactics - Phase 2: States".to_string(),
+                title: "Turn-Based Tactics - Phase 3: Units".to_string(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
@@ -51,13 +51,21 @@ fn main() {
         // Systems that run when exiting MainMenu state
         .add_systems(OnExit(AppState::MainMenu), cleanup_main_menu)
         // Systems that run when entering GamePlay state
-        .add_systems(OnEnter(AppState::GamePlay), (setup_grid, center_camera).chain())
+        .add_systems(
+            OnEnter(AppState::GamePlay),
+            (setup_grid, center_camera, spawn_units).chain(),
+        )
         // Systems that run every frame during MainMenu
         .add_systems(Update, menu_input_system.run_if(in_state(AppState::MainMenu)))
         // Systems that run every frame during GamePlay
         .add_systems(
             Update,
-            (mouse_input_system, camera_pan_system).run_if(in_state(AppState::GamePlay)),
+            (
+                unit_selection_system,
+                highlight_selected_system,
+                camera_pan_system,
+            )
+                .run_if(in_state(AppState::GamePlay)),
         )
         // Run the app!
         .run();
