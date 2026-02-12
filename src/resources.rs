@@ -67,34 +67,9 @@ impl Default for GridMap {
 }
 
 // ===== TURN MANAGEMENT RESOURCE (for Phase 4) =====
-
-/// Tracks the current turn and which faction is active
-#[derive(Resource, Debug)]
-pub struct TurnManager {
-    pub current_turn: u32,
-    pub active_faction: Faction,
-}
-
-impl Default for TurnManager {
-    fn default() -> Self {
-        Self {
-            current_turn: 1,
-            active_faction: Faction::Player,
-        }
-    }
-}
-
-impl TurnManager {
-    pub fn next_turn(&mut self) {
-        self.active_faction = match self.active_faction {
-            Faction::Player => Faction::Enemy,
-            Faction::Enemy => {
-                self.current_turn += 1;
-                Faction::Player
-            }
-        };
-    }
-}
+// NOTE: Turn management is now handled by TurnState state machine in main.rs
+// The TurnManager resource was redundant and has been removed.
+// If you need to track turn counts in the future, create a separate TurnCounter resource.
 
 // ===== SELECTION STATE RESOURCE (for Phase 3) =====
 

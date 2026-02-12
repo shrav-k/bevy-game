@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 bevy = "0.18"
-rand = "0.8"  # For simple AI randomness
 
 # Optimize debug builds for better performance
 # Bevy projects are notoriously slow in debug mode without these settings

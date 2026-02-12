@@ -3,9 +3,9 @@
 
 use bevy::prelude::*;
 
-use crate::components::{Faction, GridPosition, Hoverable, Selected, Tile, TurnStatus, Unit};
+use crate::components::{AIControlled, Faction, GridPosition, Hoverable, Selected, Tile, TurnStatus, Unit};
 use crate::constants::*;
-use crate::resources::{EnemyTurnTimer, GridMap, SelectionState, TurnManager};
+use crate::resources::{EnemyTurnTimer, GridMap, SelectionState};
 use crate::{AppState, TurnState};
 
 // ===== SETUP SYSTEMS =====
@@ -115,52 +115,8 @@ pub fn camera_pan_system(
 }
 
 // ===== INPUT SYSTEMS (for Phase 2) =====
-
-/// Detects mouse clicks and converts to grid coordinates
-/// This will be expanded in Phase 2 to handle unit selection
-pub fn mouse_input_system(
-    buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
-    grid_map: Res<GridMap>,
-) {
-    // Only process if left mouse button was just pressed
-    if !buttons.just_pressed(MouseButton::Left) {
-        return;
-    }
-
-    // Get the primary window
-    let Ok(window) = windows.single() else {
-        return;
-    };
-
-    // Get camera and its transform
-    let Ok((camera, camera_transform)) = camera_query.single() else {
-        return;
-    };
-
-    // Get cursor position in window
-    if let Some(cursor_pos) = window.cursor_position() {
-        // Convert cursor position to world position
-        if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) {
-            // Convert world position to grid coordinates
-            let grid_pos = grid_map.world_to_grid(world_pos);
-
-            // Check if click is within grid bounds
-            if grid_map.is_in_bounds(&grid_pos) {
-                info!(
-                    "Clicked tile at grid position ({}, {}), world position ({:.1}, {:.1})",
-                    grid_pos.x, grid_pos.y, world_pos.x, world_pos.y
-                );
-            } else {
-                info!(
-                    "Clicked outside grid at ({}, {})",
-                    grid_pos.x, grid_pos.y
-                );
-            }
-        }
-    }
-}
+// NOTE: The simple mouse_input_system has been replaced by unit_selection_system
+// which provides more comprehensive click handling with unit selection logic.
 
 // ===== MAIN MENU SYSTEMS (Phase 2) =====
 
@@ -218,7 +174,7 @@ pub fn setup_main_menu(mut commands: Commands) {
 
             // Phase info text
             parent.spawn((
-                Text::new("Phase 4: Turn-Based Movement"),
+                Text::new("Phase 5: Simple AI"),
                 TextFont {
                     font_size: 20.0,
                     ..default()
@@ -284,7 +240,7 @@ pub fn spawn_units(mut commands: Commands, grid_map: Res<GridMap>) {
         ));
     }
 
-    // Spawn 2 enemy units (red circles)
+    // Spawn 2 enemy units (red circles) - AI controlled
     let enemy_positions = vec![GridPosition::new(6, 7), GridPosition::new(7, 7)];
 
     for grid_pos in enemy_positions {
@@ -296,6 +252,7 @@ pub fn spawn_units(mut commands: Commands, grid_map: Res<GridMap>) {
             },
             grid_pos,
             TurnStatus::default(), // Track if unit has acted this turn
+            AIControlled,          // Mark as AI-controlled (Phase 5)
             Sprite {
                 color: ENEMY_COLOR,
                 custom_size: Some(Vec2::new(UNIT_RADIUS * 2.0, UNIT_RADIUS * 2.0)),
@@ -371,18 +328,10 @@ pub fn unit_selection_system(
                         clicked_grid_pos.x, clicked_grid_pos.y
                     );
                 }
-            } else {
-                // Clicked empty tile - deselect all
-                for selected_entity in &selected_query {
-                    commands.entity(selected_entity).remove::<Selected>();
-                }
-                selection_state.clear_selection();
-
-                info!(
-                    "Clicked empty tile at ({}, {}) - deselected all",
-                    clicked_grid_pos.x, clicked_grid_pos.y
-                );
             }
+            // Note: We DON'T deselect on empty tile clicks anymore
+            // This allows movement_system to handle clicks on movement targets
+            // Units stay selected until you select a different unit
         }
     }
 }
@@ -440,11 +389,14 @@ pub fn highlight_selected_system(
 pub struct MovementHighlight;
 
 /// Highlights valid movement tiles for the selected unit
-/// Shows green overlay on adjacent tiles
+/// Shows green overlay on adjacent tiles that are unoccupied
 pub fn highlight_movement_system(
     mut commands: Commands,
     selected_query: Query<(&GridPosition, &Unit), With<Selected>>,
     highlight_query: Query<Entity, With<MovementHighlight>>,
+    // Query all units to check for collisions
+    all_player_units: Query<&GridPosition, (With<Unit>, Without<AIControlled>)>,
+    ai_units: Query<&GridPosition, (With<Unit>, With<AIControlled>)>,
     selection_state: Res<SelectionState>,
     grid_map: Res<GridMap>,
     turn_state: Res<State<TurnState>>,
@@ -472,87 +424,138 @@ pub fn highlight_movement_system(
 
             for adj_pos in adjacent_positions {
                 // Check if position is in bounds
-                if grid_map.is_in_bounds(&adj_pos) {
-                    let world_pos = grid_map.grid_to_world(&adj_pos);
-
-                    // Spawn highlight overlay
-                    commands.spawn((
-                        Sprite {
-                            color: MOVEMENT_HIGHLIGHT,
-                            custom_size: Some(Vec2::new(TILE_SIZE, TILE_SIZE)),
-                            ..default()
-                        },
-                        Transform::from_xyz(world_pos.x, world_pos.y, Z_OVERLAY),
-                        MovementHighlight,
-                    ));
+                if !grid_map.is_in_bounds(&adj_pos) {
+                    continue;
                 }
+
+                // **COLLISION DETECTION:** Only highlight unoccupied tiles
+                let occupied_by_player = all_player_units.iter()
+                    .any(|unit_pos| unit_pos.x == adj_pos.x && unit_pos.y == adj_pos.y);
+
+                let occupied_by_ai = ai_units.iter()
+                    .any(|unit_pos| unit_pos.x == adj_pos.x && unit_pos.y == adj_pos.y);
+
+                // Skip occupied tiles - don't highlight them
+                if occupied_by_player || occupied_by_ai {
+                    continue;
+                }
+
+                let world_pos = grid_map.grid_to_world(&adj_pos);
+
+                // Spawn highlight overlay
+                commands.spawn((
+                    Sprite {
+                        color: MOVEMENT_HIGHLIGHT,
+                        custom_size: Some(Vec2::new(TILE_SIZE, TILE_SIZE)),
+                        ..default()
+                    },
+                    Transform::from_xyz(world_pos.x, world_pos.y, Z_OVERLAY),
+                    MovementHighlight,
+                ));
             }
         }
     }
 }
 
-/// Handles unit movement on click
-/// Moves selected unit to adjacent tile if valid
+/// Handles player unit movement on mouse click (Phase 4)
+///
+/// This system only runs during PlayerTurn state.
+/// IMPORTANT: Must run AFTER unit_selection_system in the same frame to avoid race conditions.
+///
+/// Movement Rules:
+/// - Only selected units can move
+/// - Can only move to adjacent tiles (4-directional, no diagonals)
+/// - Tiles must be within grid bounds
+/// - After moving, unit is marked as "has_acted" for turn management
 pub fn movement_system(
     buttons: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     grid_map: Res<GridMap>,
-    mut unit_query: Query<(&mut GridPosition, &mut Transform, &mut TurnStatus, &Unit), With<Selected>>,
+    // Query filters: With<Selected> = only selected units, Without<AIControlled> = exclude enemy units
+    mut unit_query: Query<
+        (&mut GridPosition, &mut Transform, &mut TurnStatus, &Unit),
+        (With<Selected>, Without<AIControlled>),
+    >,
+    // Query for other player units (to check collisions)
+    other_player_units: Query<&GridPosition, (With<Unit>, Without<Selected>, Without<AIControlled>)>,
+    // Query for AI units (to check collisions)
+    ai_units: Query<&GridPosition, (With<Unit>, With<AIControlled>)>,
     selection_state: Res<SelectionState>,
     turn_state: Res<State<TurnState>>,
 ) {
-    // Only allow movement during player turn
+    // Only allow movement during player turn (AI moves during enemy turn)
     if *turn_state.get() != TurnState::PlayerTurn {
         return;
     }
 
-    // Only process if left mouse button was just pressed
+    // Only process if left mouse button was just pressed (not held)
     if !buttons.just_pressed(MouseButton::Left) {
         return;
     }
 
+    // Get window for cursor position
     let Ok(window) = windows.single() else {
         return;
     };
 
+    // Get camera for screen-to-world conversion
     let Ok((camera, camera_transform)) = camera_query.single() else {
         return;
     };
 
+    // Convert cursor position to grid coordinates
     if let Some(cursor_pos) = window.cursor_position() {
         if let Ok(world_pos) = camera.viewport_to_world_2d(camera_transform, cursor_pos) {
             let clicked_grid_pos = grid_map.world_to_grid(world_pos);
 
-            // Get the selected unit
+            // Try to move the selected unit (if one exists)
             if let Some(selected_entity) = selection_state.selected_unit {
+                // Get the selected unit's components (this might fail if unit was just selected)
                 if let Ok((mut unit_grid_pos, mut unit_transform, mut turn_status, _)) =
                     unit_query.get_mut(selected_entity)
                 {
-                    // Check if clicked position is adjacent
+                    // **CRITICAL CHECK:** Unit can only move once per turn
+                    if turn_status.has_acted {
+                        info!("Unit has already acted this turn - cannot move again");
+                        return;
+                    }
+
+                    // Check if clicked tile is adjacent to unit's current position
                     let adjacent_positions = unit_grid_pos.adjacent();
                     let is_adjacent = adjacent_positions
                         .iter()
                         .any(|pos| pos.x == clicked_grid_pos.x && pos.y == clicked_grid_pos.y);
 
+                    // Execute movement if valid
                     if is_adjacent && grid_map.is_in_bounds(&clicked_grid_pos) {
-                        // Move the unit
+                        // **COLLISION DETECTION:** Check if destination is occupied by any other unit
+                        let occupied_by_player = other_player_units.iter()
+                            .any(|unit_pos| unit_pos.x == clicked_grid_pos.x && unit_pos.y == clicked_grid_pos.y);
+
+                        let occupied_by_ai = ai_units.iter()
+                            .any(|unit_pos| unit_pos.x == clicked_grid_pos.x && unit_pos.y == clicked_grid_pos.y);
+
+                        if occupied_by_player || occupied_by_ai {
+                            info!("Cannot move to ({}, {}) - tile occupied by another unit",
+                                clicked_grid_pos.x, clicked_grid_pos.y);
+                            return;
+                        }
+
+                        // Calculate new world position for rendering
                         let new_world_pos = grid_map.grid_to_world(&clicked_grid_pos);
 
-                        // Update grid position
+                        // Update grid position (logical position)
                         *unit_grid_pos = clicked_grid_pos;
 
-                        // Update world position
+                        // Update transform (visual position)
                         unit_transform.translation.x = new_world_pos.x;
                         unit_transform.translation.y = new_world_pos.y;
 
-                        // Mark as acted
+                        // Mark unit as having acted this turn
                         turn_status.has_acted = true;
 
-                        info!(
-                            "Unit moved to ({}, {})",
-                            clicked_grid_pos.x, clicked_grid_pos.y
-                        );
+                        info!("Player unit moved to ({}, {})", clicked_grid_pos.x, clicked_grid_pos.y);
                     }
                 }
             }
@@ -614,31 +617,22 @@ pub fn start_player_turn(mut unit_query: Query<(&Unit, &mut TurnStatus)>) {
 }
 
 /// Resets turn status for enemy units at start of enemy turn
-/// Also triggers AI to act
+/// AI will automatically move units during the enemy turn
 pub fn start_enemy_turn(
     mut unit_query: Query<(&Unit, &mut TurnStatus)>,
     mut enemy_timer: ResMut<EnemyTurnTimer>,
 ) {
-    info!("Starting enemy turn");
+    info!("Starting enemy turn - AI will move units");
 
     // Reset the timer
     enemy_timer.timer.reset();
 
+    // Reset turn status for enemy units
     for (unit, mut status) in &mut unit_query {
         if unit.faction == Faction::Enemy {
             status.has_acted = false;
         }
     }
-
-    // For Phase 4, enemy units just pass their turn after a delay
-    // Phase 5 will add actual AI movement
-    for (unit, mut status) in &mut unit_query {
-        if unit.faction == Faction::Enemy {
-            status.has_acted = true;
-        }
-    }
-
-    info!("Enemy units will pass after delay (AI not implemented yet)");
 }
 
 // ===== TURN UI SYSTEMS (Phase 4) =====
@@ -688,6 +682,133 @@ pub fn update_turn_ui_system(
                 **text = "Enemy Turn".to_string();
                 *color = TextColor(ENEMY_COLOR);
             }
+        }
+    }
+}
+
+// ===== AI SYSTEMS (Phase 5) =====
+
+/// Simple AI system that moves enemy units toward the nearest player unit (Phase 5)
+///
+/// AI Strategy:
+/// 1. For each AI-controlled enemy unit
+/// 2. Find the nearest player unit (using Manhattan distance)
+/// 3. Move one tile closer to that player unit
+/// 4. Mark unit as "has_acted" when done
+///
+/// This creates a simple "chase" behavior - enemies always move toward the closest player.
+///
+/// Only runs during EnemyTurn state. Skips units that have already acted.
+///
+/// Learning Notes:
+/// - Uses Query<> with multiple filters: With<AIControlled> and With<Unit>
+/// - Demonstrates pathfinding using "greedy" algorithm (always move closer)
+/// - Manhattan distance: sum of horizontal + vertical distance (no diagonals)
+pub fn ai_movement_system(
+    // Query for AI units - get mutable access to position, transform, and turn status
+    mut ai_query: Query<
+        (Entity, &mut GridPosition, &mut Transform, &mut TurnStatus),
+        (With<AIControlled>, With<Unit>),
+    >,
+    // Query for player units - only need to read their positions for targeting
+    player_query: Query<&GridPosition, (With<Unit>, Without<AIControlled>)>,
+    grid_map: Res<GridMap>,
+    turn_state: Res<State<TurnState>>,
+) {
+    // Only run during enemy turn (player turn uses movement_system)
+    if *turn_state.get() != TurnState::EnemyTurn {
+        return;
+    }
+
+    // Collect all AI positions before mutating to check for collisions
+    let ai_positions: Vec<(Entity, GridPosition)> = ai_query
+        .iter()
+        .map(|(entity, pos, _, _)| (entity, *pos))
+        .collect();
+
+    // Process each AI-controlled unit
+    for (ai_entity, mut ai_pos, mut ai_transform, mut turn_status) in &mut ai_query {
+        // Skip units that have already moved this turn
+        if turn_status.has_acted {
+            continue;
+        }
+
+        // === STEP 1: Find the nearest player unit to target ===
+        let mut nearest_player_pos: Option<GridPosition> = None;
+        let mut min_distance = u32::MAX;
+
+        for player_pos in &player_query {
+            // Calculate Manhattan distance (sum of x and y distances)
+            let distance = ai_pos.distance_to(player_pos);
+            if distance < min_distance {
+                min_distance = distance;
+                nearest_player_pos = Some(*player_pos);
+            }
+        }
+
+        // === STEP 2: Move toward the target if one exists ===
+        if let Some(target_pos) = nearest_player_pos {
+            // Get all 4 adjacent tiles (up, down, left, right - no diagonals)
+            let adjacent_positions = ai_pos.adjacent();
+
+            // Find which adjacent tile gets us closest to the target
+            // This is a "greedy" pathfinding algorithm - always move closer
+            let mut best_move: Option<GridPosition> = None;
+            let mut best_distance = ai_pos.distance_to(&target_pos);
+
+            for adj_pos in adjacent_positions {
+                // Check if tile is within grid bounds
+                if !grid_map.is_in_bounds(&adj_pos) {
+                    continue;
+                }
+
+                // **COLLISION DETECTION:** Check if position is occupied by any unit
+                // Check player positions
+                let occupied_by_player = player_query.iter()
+                    .any(|player_pos| player_pos.x == adj_pos.x && player_pos.y == adj_pos.y);
+
+                // Check other AI unit positions (not the current unit)
+                let occupied_by_other_ai = ai_positions.iter()
+                    .any(|(entity, ai_pos_check)| *entity != ai_entity && ai_pos_check.x == adj_pos.x && ai_pos_check.y == adj_pos.y);
+
+                if occupied_by_player || occupied_by_other_ai {
+                    continue;  // Skip occupied tiles - can't move through units
+                }
+
+                // Check if this move gets us closer to target
+                let distance_from_adj = adj_pos.distance_to(&target_pos);
+                if distance_from_adj < best_distance {
+                    best_distance = distance_from_adj;
+                    best_move = Some(adj_pos);
+                }
+            }
+
+            // === STEP 3: Execute the move ===
+            if let Some(new_pos) = best_move {
+                let new_world_pos = grid_map.grid_to_world(&new_pos);
+
+                info!(
+                    "AI moving from ({}, {}) to ({}, {}) - approaching target at ({}, {})",
+                    ai_pos.x, ai_pos.y, new_pos.x, new_pos.y, target_pos.x, target_pos.y
+                );
+
+                // Update grid position (logical)
+                *ai_pos = new_pos;
+
+                // Update world position (visual)
+                ai_transform.translation.x = new_world_pos.x;
+                ai_transform.translation.y = new_world_pos.y;
+
+                // Mark unit as having acted this turn
+                turn_status.has_acted = true;
+            } else {
+                // No better position found (unit is already adjacent or blocked)
+                info!("AI unit at ({}, {}) has no valid moves", ai_pos.x, ai_pos.y);
+                turn_status.has_acted = true;
+            }
+        } else {
+            // No player units found (shouldn't happen in normal gameplay)
+            turn_status.has_acted = true;
         }
     }
 }
